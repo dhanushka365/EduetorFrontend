@@ -205,18 +205,32 @@ jobs:
         echo "📥 Loading Docker image..."
         docker load < /tmp/${{ env.DOCKER_IMAGE_NAME }}.tar
         
-        # Check if container exists and create backup
-        if docker container inspect ${{ env.CONTAINER_NAME }} >/dev/null 2>&1; then
-          echo "💾 Creating backup of existing container..."
-          docker commit ${{ env.CONTAINER_NAME }} ${{ env.DOCKER_IMAGE_NAME }}:backup-$(date +%Y%m%d-%H%M%S) || echo "⚠️ Backup failed, continuing..."
-        else
-          echo "📋 No existing container found (first deployment)"
-        fi
+        # Stop and remove ALL containers and services that might use port 80
+        echo "🛑 Clearing port 80 conflicts..."
         
-        # Stop and remove existing container (if any)
-        echo "🛑 Stopping and removing existing container..."
+        # Stop our container first
         docker stop ${{ env.CONTAINER_NAME }} 2>/dev/null || true
         docker rm ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+        
+        # Stop other containers using port 80
+        docker ps --format "{{.Names}}" | xargs -I {} sh -c 'docker port {} 2>/dev/null | grep -q ":80" && docker stop {} || true' 2>/dev/null || true
+        
+        # Stop system web servers
+        sudo systemctl stop nginx 2>/dev/null || true
+        sudo systemctl stop apache2 2>/dev/null || true
+        sudo systemctl stop httpd 2>/dev/null || true
+        
+        # Wait a moment for services to stop
+        sleep 3
+        
+        # Final port check
+        if netstat -tlnp | grep :80 >/dev/null; then
+          echo "⚠️ Something is still using port 80:"
+          netstat -tlnp | grep :80
+          echo "🔄 Attempting to kill processes..."
+          sudo fuser -k 80/tcp 2>/dev/null || true
+          sleep 2
+        fi
         
         # Run new container
         echo "🚀 Starting new container..."
@@ -224,12 +238,18 @@ jobs:
           --name ${{ env.CONTAINER_NAME }} \
           --restart unless-stopped \
           -p 80:80 \
-          -p 443:443 \
           --health-cmd="wget --no-verbose --tries=1 --spider http://localhost/health || exit 1" \
           --health-interval=30s \
           --health-timeout=10s \
           --health-retries=3 \
           ${{ env.DOCKER_IMAGE_NAME }}:latest
+        
+        if [ $? -ne 0 ]; then
+          echo "❌ Failed to start container! Checking what's using port 80..."
+          netstat -tlnp | grep :80
+          docker ps -a | grep ${{ env.CONTAINER_NAME }}
+          exit 1
+        fi
         
         # Wait for container to be healthy
         echo "⏳ Waiting for application to start..."
