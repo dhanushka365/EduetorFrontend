@@ -1,0 +1,73 @@
+name: Simple Deploy to Oracle VM
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install dependencies
+      run: npm install
+      
+    - name: Build application
+      run: npm run build
+      
+    - name: Prepare deployment files
+      run: |
+        echo "Creating deployment package..."
+        cd dist/eduetor-frontend
+        tar -czf ../../app.tar.gz .
+        cd ../..
+        echo "Package created: $(ls -lh app.tar.gz)"
+        
+    - name: Deploy to server
+      env:
+        HOST: ${{ secrets.ORACLE_VM_HOST }}
+        USER: ${{ secrets.ORACLE_VM_USER }}
+        SSH_KEY: ${{ secrets.ORACLE_VM_SSH_KEY }}
+      run: |
+        # Setup SSH
+        mkdir -p ~/.ssh
+        echo "$SSH_KEY" > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+        ssh-keyscan -H $HOST >> ~/.ssh/known_hosts
+        
+        # Upload and deploy
+        scp -i ~/.ssh/deploy_key app.tar.gz $USER@$HOST:/tmp/
+        
+        ssh -i ~/.ssh/deploy_key $USER@$HOST "
+          # Extract files
+          cd /tmp
+          tar -xzf app.tar.gz
+          
+          # Deploy
+          sudo mkdir -p /var/www/html/eduetor
+          sudo cp -r . /var/www/html/eduetor/
+          sudo chown -R www-data:www-data /var/www/html/eduetor
+          sudo chmod -R 755 /var/www/html/eduetor
+          
+          # Restart web server
+          if command -v nginx >/dev/null; then
+            sudo systemctl reload nginx
+          elif command -v apache2 >/dev/null; then
+            sudo systemctl reload apache2
+          fi
+          
+          # Cleanup
+          rm -f /tmp/app.tar.gz
+          rm -f /tmp/*.html /tmp/*.js /tmp/*.css 2>/dev/null || true
+          
+          echo 'Deployment complete!'
+        "
