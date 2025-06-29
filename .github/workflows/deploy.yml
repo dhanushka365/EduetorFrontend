@@ -1,80 +1,250 @@
-name: Deploy to Oracle VM
+name: 🚀 Docker Deployment Pipeline
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment Environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+
+env:
+  DOCKER_IMAGE_NAME: eduetor-frontend
+  CONTAINER_NAME: eduetor-frontend
 
 jobs:
-  deploy:
+  # Job 1: Build and Test
+  build-and-test:
+    name: 🔨 Build & Test
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
+    - name: 📥 Checkout Repository
       uses: actions/checkout@v4
       
-    - name: Setup Node.js
+    - name: 📦 Setup Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '18'
         cache: 'npm'
         
-    - name: Install dependencies
+    - name: 📋 Install Dependencies
       run: npm ci
       
-    - name: Build Angular app
-      run: npm run build
+    - name: 🧪 Run Tests
+      run: npm run test:ci
       
-    - name: Deploy to Oracle VM
-      env:
-        HOST: ${{ secrets.ORACLE_VM_HOST }}
-        USER: ${{ secrets.ORACLE_VM_USER }}
-        SSH_KEY: ${{ secrets.ORACLE_VM_SSH_KEY }}
+    - name: 🏗️ Build Application
+      run: npm run build --if-present
+      
+    - name: 📤 Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist-files
+        path: dist/
+        retention-days: 1
+
+  # Job 2: Build Docker Image
+  build-docker:
+    name: 🐳 Build Docker Image
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 🐳 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: 🏗️ Build Docker Image
       run: |
-        # Setup SSH
+        docker build -t ${{ env.DOCKER_IMAGE_NAME }}:latest .
+        docker tag ${{ env.DOCKER_IMAGE_NAME }}:latest ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+        
+    - name: 🧪 Test Docker Image
+      run: |
+        # Start container in background
+        docker run -d --name test-container -p 8080:80 ${{ env.DOCKER_IMAGE_NAME }}:latest
+        
+        # Wait for container to start
+        sleep 10
+        
+        # Test if application is responding
+        curl --fail http://localhost:8080/ || exit 1
+        
+        # Cleanup
+        docker stop test-container
+        docker rm test-container
+        
+    - name: 💾 Save Docker Image
+      run: |
+        docker save ${{ env.DOCKER_IMAGE_NAME }}:latest > ${{ env.DOCKER_IMAGE_NAME }}.tar
+        
+    - name: 📤 Upload Docker Image
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-image
+        path: ${{ env.DOCKER_IMAGE_NAME }}.tar
+        retention-days: 1
+
+  # Job 3: Deploy to Server
+  deploy:
+    name: 🚀 Deploy to Server
+    runs-on: ubuntu-latest
+    needs: [build-and-test, build-docker]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
+    environment: 
+      name: ${{ github.event.inputs.environment || 'production' }}
+      url: ${{ steps.deploy.outputs.app_url }}
+    
+    steps:
+    - name: 📥 Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: 📥 Download Docker Image
+      uses: actions/download-artifact@v4
+      with:
+        name: docker-image
+        
+    - name: 🔧 Setup SSH
+      env:
+        SSH_PRIVATE_KEY: ${{ secrets.ORACLE_VM_SSH_KEY }}
+        SSH_HOST: ${{ secrets.ORACLE_VM_HOST }}
+      run: |
         mkdir -p ~/.ssh
-        echo "$SSH_KEY" > ~/.ssh/deploy_key
+        echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
         chmod 600 ~/.ssh/deploy_key
-        ssh-keyscan -H $HOST >> ~/.ssh/known_hosts
+        ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
         
-        # Create deployment package
-        cd dist/eduetor-frontend
-        tar -czf ../../deployment.tar.gz .
-        cd ../..
+    - name: 📤 Upload Docker Image to Server
+      env:
+        SSH_USER: ${{ secrets.ORACLE_VM_USER }}
+        SSH_HOST: ${{ secrets.ORACLE_VM_HOST }}
+      run: |
+        scp -i ~/.ssh/deploy_key ${{ env.DOCKER_IMAGE_NAME }}.tar $SSH_USER@$SSH_HOST:/tmp/
         
-        # Upload to server
-        scp -i ~/.ssh/deploy_key deployment.tar.gz $USER@$HOST:/tmp/
+    - name: 🚀 Deploy Application
+      id: deploy
+      env:
+        SSH_USER: ${{ secrets.ORACLE_VM_USER }}
+        SSH_HOST: ${{ secrets.ORACLE_VM_HOST }}
+      run: |
+        ssh -i ~/.ssh/deploy_key $SSH_USER@$SSH_HOST << 'ENDSSH'
+        set -e
         
-        # Deploy on server
-        ssh -i ~/.ssh/deploy_key $USER@$HOST "
-          # Create backup if exists
-          if [ -d '/var/www/html/eduetor' ]; then
-            sudo mkdir -p /var/www/backups
-            sudo cp -r /var/www/html/eduetor /var/www/backups/eduetor-\$(date +%Y%m%d-%H%M%S)
+        echo "🔄 Starting deployment process..."
+        
+        # Load the new Docker image
+        echo "📥 Loading Docker image..."
+        docker load < /tmp/${{ env.DOCKER_IMAGE_NAME }}.tar
+        
+        # Create backup of current container (if exists)
+        if docker ps -q -f name=${{ env.CONTAINER_NAME }} | grep -q .; then
+          echo "💾 Creating backup of current deployment..."
+          docker commit ${{ env.CONTAINER_NAME }} ${{ env.DOCKER_IMAGE_NAME }}:backup-$(date +%Y%m%d-%H%M%S)
+        fi
+        
+        # Stop and remove existing container
+        echo "🛑 Stopping existing container..."
+        docker stop ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+        docker rm ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+        
+        # Run new container with health check
+        echo "🚀 Starting new container..."
+        docker run -d \
+          --name ${{ env.CONTAINER_NAME }} \
+          --restart unless-stopped \
+          -p 80:80 \
+          -p 443:443 \
+          --health-cmd="wget --no-verbose --tries=1 --spider http://localhost/ || exit 1" \
+          --health-interval=30s \
+          --health-timeout=10s \
+          --health-retries=3 \
+          ${{ env.DOCKER_IMAGE_NAME }}:latest
+        
+        # Wait for container to be healthy
+        echo "⏳ Waiting for application to start..."
+        for i in {1..30}; do
+          if docker ps --filter "name=${{ env.CONTAINER_NAME }}" --filter "health=healthy" | grep -q ${{ env.CONTAINER_NAME }}; then
+            echo "✅ Container is healthy!"
+            break
           fi
-          
-          # Extract and deploy
-          cd /tmp
-          tar -xzf deployment.tar.gz
-          sudo mkdir -p /var/www/html/eduetor
-          sudo rm -rf /var/www/html/eduetor/*
-          sudo cp -r . /var/www/html/eduetor/
-          
-          # Set permissions
-          sudo chown -R www-data:www-data /var/www/html/eduetor
-          sudo chmod -R 755 /var/www/html/eduetor
-          
-          # Restart web server
-          if command -v nginx >/dev/null; then
-            sudo systemctl reload nginx
-          elif command -v apache2 >/dev/null; then
-            sudo systemctl reload apache2
+          if [ $i -eq 30 ]; then
+            echo "❌ Container failed to become healthy"
+            docker logs ${{ env.CONTAINER_NAME }} --tail 20
+            exit 1
           fi
-          
-          # Cleanup
-          rm -f deployment.tar.gz
-          find /tmp -name '*.html' -o -name '*.js' -o -name '*.css' -delete 2>/dev/null || true
-          
-          echo '✅ Deployment completed successfully!'
-          echo '🌐 App available at: http://$HOST/eduetor'
-        "
+          sleep 2
+        done
+        
+        # Cleanup old images (keep last 3)
+        echo "🧹 Cleaning up old images..."
+        docker images ${{ env.DOCKER_IMAGE_NAME }} --format "table {{.Repository}}:{{.Tag}}\t{{.CreatedAt}}" | \
+        grep -v latest | tail -n +4 | awk '{print $1}' | xargs -r docker rmi || true
+        
+        # Remove uploaded tar file
+        rm -f /tmp/${{ env.DOCKER_IMAGE_NAME }}.tar
+        
+        # Verify deployment
+        echo "🔍 Verifying deployment..."
+        if curl --fail --max-time 10 http://localhost/ > /dev/null 2>&1; then
+          echo "✅ Deployment verification successful!"
+          echo "🌐 Application is running at: http://$SSH_HOST"
+        else
+          echo "❌ Deployment verification failed!"
+          exit 1
+        fi
+        
+        echo "🎉 Deployment completed successfully!"
+        ENDSSH
+        
+        # Set output for environment URL
+        echo "app_url=http://$SSH_HOST" >> $GITHUB_OUTPUT
+        
+    - name: 🧹 Cleanup Local Files
+      run: |
+        rm -f ~/.ssh/deploy_key
+        rm -f ${{ env.DOCKER_IMAGE_NAME }}.tar
+
+  # Job 4: Health Check & Notification
+  post-deploy:
+    name: 🏥 Post-Deploy Health Check
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: always() && needs.deploy.result == 'success'
+    
+    steps:
+    - name: 🏥 Health Check
+      env:
+        SSH_HOST: ${{ secrets.ORACLE_VM_HOST }}
+      run: |
+        # Wait a bit for application to fully start
+        sleep 10
+        
+        # Perform health check
+        if curl --fail --max-time 30 http://$SSH_HOST/; then
+          echo "✅ Application is healthy and responding!"
+        else
+          echo "⚠️ Health check failed - application may still be starting"
+          exit 1
+        fi
+        
+    - name: 📊 Deployment Summary
+      run: |
+        echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Environment**: ${{ github.event.inputs.environment || 'production' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Application URL**: http://${{ secrets.ORACLE_VM_HOST }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Status**: ✅ Deployed Successfully" >> $GITHUB_STEP_SUMMARY
+        echo "- **Deployed At**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
