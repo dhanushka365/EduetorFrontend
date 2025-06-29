@@ -1,0 +1,75 @@
+name: Deploy Angular App to Oracle VM
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Run tests
+      run: npm run test -- --no-watch --no-progress --browsers=ChromeHeadless
+      
+    - name: Build Angular app
+      run: npm run build --prod
+      
+    - name: Create deployment directory structure
+      run: |
+        mkdir -p deployment
+        cp -r dist/eduetor-frontend/* deployment/
+        
+    - name: Setup SSH key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.ORACLE_VM_SSH_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ secrets.ORACLE_VM_HOST }} >> ~/.ssh/known_hosts
+        
+    - name: Deploy to Oracle VM
+      run: |
+        # Create backup of current deployment
+        ssh ${{ secrets.ORACLE_VM_USER }}@${{ secrets.ORACLE_VM_HOST }} "
+          sudo mkdir -p /var/www/backups
+          if [ -d '/var/www/html/eduetor' ]; then
+            sudo cp -r /var/www/html/eduetor /var/www/backups/eduetor-$(date +%Y%m%d-%H%M%S)
+          fi
+        "
+        
+        # Upload new files
+        rsync -avz --delete deployment/ ${{ secrets.ORACLE_VM_USER }}@${{ secrets.ORACLE_VM_HOST }}:/tmp/eduetor-deployment/
+        
+        # Move files to web directory and set permissions
+        ssh ${{ secrets.ORACLE_VM_USER }}@${{ secrets.ORACLE_VM_HOST }} "
+          sudo mkdir -p /var/www/html/eduetor
+          sudo cp -r /tmp/eduetor-deployment/* /var/www/html/eduetor/
+          sudo chown -R www-data:www-data /var/www/html/eduetor
+          sudo chmod -R 755 /var/www/html/eduetor
+          sudo rm -rf /tmp/eduetor-deployment
+        "
+        
+    - name: Restart web server
+      run: |
+        ssh ${{ secrets.ORACLE_VM_USER }}@${{ secrets.ORACLE_VM_HOST }} "
+          sudo systemctl reload nginx || sudo systemctl reload apache2 || echo 'Web server reload skipped'
+        "
+        
+    - name: Verify deployment
+      run: |
+        echo "Deployment completed successfully!"
+        echo "Application should be available at: http://${{ secrets.ORACLE_VM_HOST }}/eduetor"
