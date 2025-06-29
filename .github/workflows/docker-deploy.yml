@@ -1,0 +1,146 @@
+name: Docker Deploy to Oracle VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_type:
+        description: 'Deployment Type'
+        required: true
+        default: 'standard'
+        type: choice
+        options:
+        - standard
+        - docker
+
+jobs:
+  docker-deploy:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.deployment_type == 'docker'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Build Docker image
+      run: |
+        docker build -t eduetor-frontend:latest .
+        docker save eduetor-frontend:latest > eduetor-frontend.tar
+        
+    - name: Deploy Docker to Oracle VM
+      env:
+        HOST: ${{ secrets.ORACLE_VM_HOST }}
+        USER: ${{ secrets.ORACLE_VM_USER }}
+        SSH_KEY: ${{ secrets.ORACLE_VM_SSH_KEY }}
+      run: |
+        # Setup SSH
+        mkdir -p ~/.ssh
+        echo "$SSH_KEY" > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+        ssh-keyscan -H $HOST >> ~/.ssh/known_hosts
+        
+        # Upload Docker image
+        scp -i ~/.ssh/deploy_key eduetor-frontend.tar $USER@$HOST:/tmp/
+        
+        # Deploy on server
+        ssh -i ~/.ssh/deploy_key $USER@$HOST "
+          # Load Docker image
+          docker load < /tmp/eduetor-frontend.tar
+          
+          # Stop existing container
+          docker stop eduetor-frontend 2>/dev/null || true
+          docker rm eduetor-frontend 2>/dev/null || true
+          
+          # Run new container
+          docker run -d \\
+            --name eduetor-frontend \\
+            --restart unless-stopped \\
+            -p 80:80 \\
+            eduetor-frontend:latest
+          
+          # Cleanup
+          rm /tmp/eduetor-frontend.tar
+          
+          # Verify deployment
+          sleep 5
+          if docker ps | grep -q eduetor-frontend; then
+            echo '✅ Docker deployment successful!'
+            echo '🌐 App available at: http://$HOST'
+          else
+            echo '❌ Docker deployment failed!'
+            exit 1
+          fi
+        "
+
+  standard-deploy:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.deployment_type == 'standard' || github.event.inputs.deployment_type == ''
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Build Angular app
+      run: npm run build
+      
+    - name: Deploy to Oracle VM
+      env:
+        HOST: ${{ secrets.ORACLE_VM_HOST }}
+        USER: ${{ secrets.ORACLE_VM_USER }}
+        SSH_KEY: ${{ secrets.ORACLE_VM_SSH_KEY }}
+      run: |
+        # Setup SSH
+        mkdir -p ~/.ssh
+        echo "$SSH_KEY" > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+        ssh-keyscan -H $HOST >> ~/.ssh/known_hosts
+        
+        # Create deployment package
+        cd dist/eduetor-frontend
+        tar -czf ../../deployment.tar.gz .
+        cd ../..
+        
+        # Upload to server
+        scp -i ~/.ssh/deploy_key deployment.tar.gz $USER@$HOST:/tmp/
+        
+        # Deploy on server
+        ssh -i ~/.ssh/deploy_key $USER@$HOST "
+          # Create backup if exists
+          if [ -d '/var/www/html/eduetor' ]; then
+            sudo mkdir -p /var/www/backups
+            sudo cp -r /var/www/html/eduetor /var/www/backups/eduetor-\$(date +%Y%m%d-%H%M%S)
+          fi
+          
+          # Extract and deploy
+          cd /tmp
+          tar -xzf deployment.tar.gz
+          sudo mkdir -p /var/www/html/eduetor
+          sudo rm -rf /var/www/html/eduetor/*
+          sudo cp -r . /var/www/html/eduetor/
+          
+          # Set permissions
+          sudo chown -R www-data:www-data /var/www/html/eduetor
+          sudo chmod -R 755 /var/www/html/eduetor
+          
+          # Restart web server
+          if command -v nginx >/dev/null; then
+            sudo systemctl reload nginx
+          elif command -v apache2 >/dev/null; then
+            sudo systemctl reload apache2
+          fi
+          
+          # Cleanup
+          rm -f deployment.tar.gz
+          find /tmp -name '*.html' -o -name '*.js' -o -name '*.css' -delete 2>/dev/null || true
+          
+          echo '✅ Standard deployment completed successfully!'
+          echo '🌐 App available at: http://$HOST/eduetor'
+        "

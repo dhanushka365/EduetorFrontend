@@ -24,12 +24,27 @@ npm run build
    - `ORACLE_VM_USER` - SSH username (e.g., `ubuntu`, `opc`)
    - `ORACLE_VM_SSH_KEY` - Your private SSH key content
 
-2. **Push to master branch**:
+2. **Standard Deployment** (push to master):
    ```bash
    git push origin master
    ```
 
-3. **Access your app** at: `http://YOUR-VM-IP/eduetor`
+3. **Docker Deployment** (manual trigger):
+   - Go to Actions tab → "Docker Deploy to Oracle VM"
+   - Click "Run workflow" → Select "docker"
+
+4. **Access your app** at: `http://YOUR-VM-IP/eduetor` (standard) or `http://YOUR-VM-IP` (docker)
+
+### Docker Deployment (Local)
+
+```bash
+# Build and run with Docker Compose
+docker-compose up -d
+
+# Or build and run manually
+docker build -t eduetor-frontend .
+docker run -d -p 80:80 --name eduetor-frontend eduetor-frontend
+```
 
 ### Manual Deployment
 
