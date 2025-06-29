@@ -205,25 +205,27 @@ jobs:
         echo "📥 Loading Docker image..."
         docker load < /tmp/${{ env.DOCKER_IMAGE_NAME }}.tar
         
-        # Create backup of current container (if exists)
-        if docker ps -q -f name=${{ env.CONTAINER_NAME }} | grep -q .; then
-          echo "💾 Creating backup of current deployment..."
-          docker commit ${{ env.CONTAINER_NAME }} ${{ env.DOCKER_IMAGE_NAME }}:backup-$(date +%Y%m%d-%H%M%S)
+        # Check if container exists and create backup
+        if docker container inspect ${{ env.CONTAINER_NAME }} >/dev/null 2>&1; then
+          echo "💾 Creating backup of existing container..."
+          docker commit ${{ env.CONTAINER_NAME }} ${{ env.DOCKER_IMAGE_NAME }}:backup-$(date +%Y%m%d-%H%M%S) || echo "⚠️ Backup failed, continuing..."
+        else
+          echo "📋 No existing container found (first deployment)"
         fi
         
-        # Stop and remove existing container
-        echo "🛑 Stopping existing container..."
+        # Stop and remove existing container (if any)
+        echo "🛑 Stopping and removing existing container..."
         docker stop ${{ env.CONTAINER_NAME }} 2>/dev/null || true
         docker rm ${{ env.CONTAINER_NAME }} 2>/dev/null || true
         
-        # Run new container with health check
+        # Run new container
         echo "🚀 Starting new container..."
         docker run -d \
           --name ${{ env.CONTAINER_NAME }} \
           --restart unless-stopped \
           -p 80:80 \
           -p 443:443 \
-          --health-cmd="wget --no-verbose --tries=1 --spider http://localhost/ || exit 1" \
+          --health-cmd="wget --no-verbose --tries=1 --spider http://localhost/health || exit 1" \
           --health-interval=30s \
           --health-timeout=10s \
           --health-retries=3 \
@@ -238,6 +240,7 @@ jobs:
           fi
           if [ $i -eq 30 ]; then
             echo "❌ Container failed to become healthy"
+            echo "📋 Container logs:"
             docker logs ${{ env.CONTAINER_NAME }} --tail 20
             exit 1
           fi
@@ -247,14 +250,14 @@ jobs:
         # Cleanup old images (keep last 3)
         echo "🧹 Cleaning up old images..."
         docker images ${{ env.DOCKER_IMAGE_NAME }} --format "table {{.Repository}}:{{.Tag}}\t{{.CreatedAt}}" | \
-        grep -v latest | tail -n +4 | awk '{print $1}' | xargs -r docker rmi || true
+        grep -v latest | tail -n +4 | awk '{print $1}' | xargs -r docker rmi 2>/dev/null || true
         
         # Remove uploaded tar file
         rm -f /tmp/${{ env.DOCKER_IMAGE_NAME }}.tar
         
         # Verify deployment
         echo "🔍 Verifying deployment..."
-        if curl --fail --max-time 10 http://localhost/ > /dev/null 2>&1; then
+        if curl --fail --max-time 10 http://localhost/health > /dev/null 2>&1; then
           echo "✅ Deployment verification successful!"
           echo "🌐 Application is running at: http://$SSH_HOST"
         else
