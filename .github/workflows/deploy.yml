@@ -83,14 +83,55 @@ jobs:
         
     - name: 🧪 Test Docker Image
       run: |
+        echo "🚀 Starting Docker container for testing..."
+        
         # Start container in background
         docker run -d --name test-container -p 8080:80 ${{ env.DOCKER_IMAGE_NAME }}:latest
         
-        # Wait for container to start
-        sleep 10
+        # Wait for container to start and be ready
+        echo "⏳ Waiting for container to start..."
+        sleep 15
         
-        # Test if application is responding
-        curl --fail http://localhost:8080/ || exit 1
+        # Check if container is running
+        if ! docker ps | grep -q test-container; then
+          echo "❌ Container failed to start!"
+          docker logs test-container
+          exit 1
+        fi
+        
+        # Test health endpoint first
+        echo "🏥 Testing health endpoint..."
+        for i in {1..10}; do
+          if curl --fail --max-time 5 http://localhost:8080/health; then
+            echo "✅ Health check passed!"
+            break
+          fi
+          if [ $i -eq 10 ]; then
+            echo "❌ Health check failed after 10 attempts"
+            docker logs test-container
+            exit 1
+          fi
+          echo "🔄 Attempt $i failed, retrying in 3 seconds..."
+          sleep 3
+        done
+        
+        # Test main application
+        echo "🌐 Testing main application..."
+        for i in {1..5}; do
+          if curl --fail --max-time 10 http://localhost:8080/; then
+            echo "✅ Application is responding!"
+            break
+          fi
+          if [ $i -eq 5 ]; then
+            echo "❌ Application test failed after 5 attempts"
+            docker logs test-container
+            exit 1
+          fi
+          echo "🔄 Application test attempt $i failed, retrying in 2 seconds..."
+          sleep 2
+        done
+        
+        echo "🎉 Docker image test completed successfully!"
         
         # Cleanup
         docker stop test-container
