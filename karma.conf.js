@@ -37,9 +37,22 @@ module.exports = function (config) {
     customLaunchers: {
       ChromeHeadlessCI: {
         base: 'ChromeHeadless',
-        flags: ['--no-sandbox', '--disable-gpu']
+        flags: [
+          '--no-sandbox',
+          '--disable-gpu',
+          '--disable-web-security',
+          '--disable-dev-shm-usage',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding',
+          '--headless',
+          '--remote-debugging-port=9222'
+        ]
       }
     },
-    restartOnFileChange: true
+    restartOnFileChange: true,
+    // CI-specific settings
+    singleRun: false,
+    logLevel: config.LOG_INFO
   });
 };
