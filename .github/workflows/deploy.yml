@@ -93,11 +93,17 @@ jobs:
         sleep 15
         
         # Check if container is running
+        echo "🔍 Checking container status..."
         if ! docker ps | grep -q test-container; then
           echo "❌ Container failed to start!"
+          echo "📋 Container logs:"
           docker logs test-container
+          echo "📋 All containers:"
+          docker ps -a
           exit 1
         fi
+        
+        echo "✅ Container is running!"
         
         # Test health endpoint first
         echo "🏥 Testing health endpoint..."
