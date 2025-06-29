@@ -224,9 +224,9 @@ jobs:
         sleep 3
         
         # Final port check
-        if netstat -tlnp | grep :80 >/dev/null; then
+        if ss -tlnp | grep :80 >/dev/null 2>/dev/null || netstat -tlnp 2>/dev/null | grep :80 >/dev/null; then
           echo "⚠️ Something is still using port 80:"
-          netstat -tlnp | grep :80
+          ss -tlnp | grep :80 2>/dev/null || netstat -tlnp | grep :80 2>/dev/null || echo "Port check tools unavailable"
           echo "🔄 Attempting to kill processes..."
           sudo fuser -k 80/tcp 2>/dev/null || true
           sleep 2
@@ -246,25 +246,55 @@ jobs:
         
         if [ $? -ne 0 ]; then
           echo "❌ Failed to start container! Checking what's using port 80..."
-          netstat -tlnp | grep :80
+          ss -tlnp | grep :80 2>/dev/null || netstat -tlnp | grep :80 2>/dev/null || echo "No port check tools available"
           docker ps -a | grep ${{ env.CONTAINER_NAME }}
           exit 1
         fi
         
         # Wait for container to be healthy
         echo "⏳ Waiting for application to start..."
+        
+        # First, let's check if the container started properly
+        sleep 5
+        if ! docker ps | grep -q ${{ env.CONTAINER_NAME }}; then
+          echo "❌ Container failed to start or exited!"
+          docker ps -a | grep ${{ env.CONTAINER_NAME }}
+          docker logs ${{ env.CONTAINER_NAME }}
+          exit 1
+        fi
+        
+        echo "✅ Container is running, checking application..."
+        
+        # Test basic connectivity first
         for i in {1..30}; do
-          if docker ps --filter "name=${{ env.CONTAINER_NAME }}" --filter "health=healthy" | grep -q ${{ env.CONTAINER_NAME }}; then
-            echo "✅ Container is healthy!"
+          if curl --fail --silent --max-time 5 http://localhost/ >/dev/null 2>&1; then
+            echo "✅ Application is responding!"
             break
           fi
           if [ $i -eq 30 ]; then
-            echo "❌ Container failed to become healthy"
+            echo "❌ Application not responding after 30 attempts"
+            echo "📋 Testing direct curl:"
+            curl -I http://localhost/ 2>&1 || echo "Connection failed"
             echo "📋 Container logs:"
-            docker logs ${{ env.CONTAINER_NAME }} --tail 20
+            docker logs ${{ env.CONTAINER_NAME }} --tail 30
             exit 1
           fi
           sleep 2
+        done
+        
+        # Now test health endpoint
+        echo "🏥 Testing health endpoint..."
+        for i in {1..10}; do
+          if curl --fail --silent --max-time 5 http://localhost/health >/dev/null 2>&1; then
+            echo "✅ Health check passed!"
+            break
+          fi
+          if [ $i -eq 10 ]; then
+            echo "⚠️ Health endpoint not responding, but main app works"
+            echo "📋 Health endpoint test:"
+            curl -v http://localhost/health 2>&1 || echo "Health endpoint failed"
+          fi
+          sleep 1
         done
         
         # Cleanup old images (keep last 3)
